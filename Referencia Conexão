@@ -1,0 +1,208 @@
+// Shortcode: [websocket_rocket_league_display]
+function websocket_rocket_league_display_shortcode() {
+    ob_start();
+    ?>
+    <style>
+        #ast-desktop-header > div > div > div > div { display: none; }
+        #led-status {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: gray;
+            margin-left: 10px;
+            vertical-align: middle;
+            transition: background 0.1s;
+        }
+    </style>
+
+    <div>
+        <h3>Servidor de Visão (Rocket League / Pac-Man)</h3>
+        <div id="vision-data" style="font-family: monospace; white-space: pre-wrap; background:#f4f4f4; padding:10px; margin-bottom:20px;">
+            Conectando ao servidor de visão...
+        </div>
+
+        <h3>Controle do Robô</h3>
+        <div style="margin-bottom:15px;">
+            <label for="robot-ip">IP do Robô:</label><br>
+            <select id="robot-ip" style="width:220px; padding:5px;">
+                <option value="192.168.1.107">⚽ Rocket League Azul (carro_1)</option>
+                <option value="">⚽ Rocket League Rosa (carro_2) — A DEFINIR</option>
+                <option value="192.168.1.116">👾 Pac-Man</option>
+                <option value="192.168.1.119">👻 Fantasma Azul</option>
+                <option value="192.168.1.117">👻 Fantasma Rosa</option>
+                <option value="192.168.1.120">👻 Fantasma Verde</option>
+                <option value="">👻 Fantasma Vermelho — A DEFINIR</option>
+            </select>
+        </div>
+
+        <div style="margin-bottom:15px;">
+            <label>Velocidade Motor Esquerdo (-255 a 255):</label><br>
+            <input type="number" id="motor1" min="-255" max="255" value="0" style="width:100px; padding:5px;">
+        </div>
+
+        <div style="margin-bottom:15px;">
+            <label>Velocidade Motor Direito (-255 a 255):</label><br>
+            <input type="number" id="motor2" min="-255" max="255" value="0" style="width:100px; padding:5px;">
+        </div>
+
+        <button id="send-command" onclick="sendMotorCommand()">Enviar Comando</button>
+        <span id="led-status">●</span>
+
+        <div id="command-status" style="margin-top:10px; color:green;"></div>
+        <div id="robot-feedback" style="margin-top:10px; font-family: monospace; background:#f9f9f9; padding:8px; display:none;"></div>
+    </div>
+
+    <script type="text/javascript">
+        // ===================================================================
+        // 🔌 CONFIGURAÇÃO DE ENDEREÇOS IP (Centralizada no Início)
+        // ===================================================================
+
+        // Servidor de Visão
+        const VISION_WS_URL = 'ws://192.168.1.106:8765'; // Rocket League & Pac-Man (mesmo servidor)
+
+        // IPs dos Robôs (null = não configurado)
+        const ROBOT_IPS = {
+            // Rocket League
+            rocket_azul:    '192.168.1.107',  // carro_1
+            rocket_rosa:    null,             // carro_2 — A DEFINIR
+
+            // Pac-Man Arena
+            pacman:         '192.168.1.116',
+            fantasma_azul:  '192.168.1.119',
+            fantasma_rosa:  '192.168.1.117',
+            fantasma_verde: '192.168.1.120',
+            fantasma_vermelho: null          // A DEFINIR
+        };
+
+        // ===================================================================
+        // 👁️‍🗨️ Conexão com o Servidor de Visão
+        // ===================================================================
+        let visionWs = null;
+        const visionDiv = document.getElementById('vision-data');
+
+        function connectVision() {
+            visionWs = new WebSocket(VISION_WS_URL);
+
+            visionWs.onopen = function() {
+                visionDiv.innerHTML = 'Conectado ao servidor de visão.\nAguardando dados...';
+            };
+
+            visionWs.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    const formatted = JSON.stringify(data, null, 2);
+                    visionDiv.innerHTML = '<strong>Dados de Visão:</strong>\n' + formatted;
+                } catch (e) {
+                    visionDiv.innerHTML = 'Erro ao processar visão: ' + event.data;
+                }
+            };
+
+            visionWs.onclose = function() {
+                visionDiv.innerHTML = '⚠️ Conexão com visão perdida. Reconectando em 3s...';
+                setTimeout(connectVision, 3000);
+            };
+
+            visionWs.onerror = function(err) {
+                visionDiv.innerHTML = 'Erro na conexão de visão: ' + (err.message || 'desconhecido');
+            };
+        }
+
+        connectVision();
+
+        // ===================================================================
+        // 🤖 Controle do Robô
+        // ===================================================================
+        let robotWs = null;
+        let robotResponseTimeout = null;
+
+        function setLed(color) {
+            document.getElementById('led-status').style.background = color;
+        }
+
+        function blink(color, times = 3, interval = 150) {
+            let count = 0;
+            const flash = () => {
+                setLed(count % 2 === 0 ? color : 'gray');
+                count++;
+                if (count < times * 2) {
+                    setTimeout(flash, interval);
+                } else {
+                    setLed('gray');
+                }
+            };
+            flash();
+        }
+
+        function sendMotorCommand() {
+            const ip = document.getElementById('robot-ip').value.trim();
+            const motor1 = parseInt(document.getElementById('motor1').value) || 0;
+            const motor2 = parseInt(document.getElementById('motor2').value) || 0;
+            const statusDiv = document.getElementById('command-status');
+            const feedbackDiv = document.getElementById('robot-feedback');
+
+            if (!ip || ip === '') {
+                statusDiv.innerHTML = '❌ IP do robô não selecionado ou inválido.';
+                setLed('red');
+                setTimeout(() => setLed('gray'), 3000);
+                return;
+            }
+
+            if (robotResponseTimeout) clearTimeout(robotResponseTimeout);
+            blink('blue');
+
+            const robotWsUrl = `ws://${ip}:81`;
+
+            if (robotWs && (robotWs.readyState === WebSocket.CLOSING || robotWs.readyState === WebSocket.CLOSED)) {
+                robotWs = null;
+            }
+
+            if (!robotWs || robotWs.readyState !== WebSocket.OPEN) {
+                robotWs = new WebSocket(robotWsUrl);
+
+                robotWs.onopen = () => sendCommand();
+                robotWs.onmessage = (event) => {
+                    if (robotResponseTimeout) {
+                        clearTimeout(robotResponseTimeout);
+                        robotResponseTimeout = null;
+                    }
+                    blink('green');
+                    try {
+                        const telemetry = JSON.parse(event.data);
+                        const feedback = {
+                            motor1_vel: telemetry.motor1?.vel ?? 'N/A',
+                            motor2_vel: telemetry.motor2?.vel ?? 'N/A'
+                        };
+                        feedbackDiv.innerHTML = `<strong>✅ Feedback do Robô:</strong><br>${JSON.stringify(feedback, null, 2)}`;
+                        feedbackDiv.style.display = 'block';
+                    } catch (e) {
+                        feedbackDiv.innerHTML = '⚠️ Erro ao processar feedback do robô.';
+                        feedbackDiv.style.display = 'block';
+                    }
+                };
+                robotWs.onerror = (err) => {
+                    statusDiv.innerHTML = `❌ Erro ao conectar no robô (${ip}): ${err.message || 'desconhecido'}`;
+                    setLed('red');
+                    setTimeout(() => setLed('gray'), 3000);
+                };
+            } else {
+                sendCommand();
+            }
+
+            function sendCommand() {
+                const command = JSON.stringify({ motor1_vel: motor1, motor2_vel: motor2 });
+                robotWs.send(command);
+                statusDiv.innerHTML = `✅ Comando enviado: ${command}`;
+                robotResponseTimeout = setTimeout(() => {
+                    setLed('red');
+                    setTimeout(() => setLed('gray'), 3000);
+                    statusDiv.innerHTML += ' ⚠️ Sem resposta do robô.';
+                    robotResponseTimeout = null;
+                }, 2000);
+            }
+        }
+    </script>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('websocket_rocket_league_display', 'websocket_rocket_league_display_shortcode');
